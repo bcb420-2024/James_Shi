@@ -1,0 +1,491 @@
+---
+title: "Assignment_1_James_Shi"
+author: "James Shi"
+date: "2024-02-13"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+bibliography: bcb420_a1.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+This section installs any libraries that may be useful throughout the analysis.
+```{r, message = FALSE}
+# Loading any necessary packages for analysis
+# Only installing when necessary
+
+# BiocManager packages
+if (!require("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager") 
+  }
+
+if (!require("Biobase", quietly = TRUE)) {
+  BiocManager::install('Biobase')
+}
+
+if (!require("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery") 
+  }
+
+# Independent packages
+if (!require("edgeR", quietly = TRUE)) {
+  install.packages('edgeR')
+}
+
+if (!require("biomaRt", quietly = TRUE)) {
+  install.packages("biomaRt")
+}
+
+if (!require("dplyr", quietly = TRUE)) {
+  install.packages("dplyr")
+}
+
+
+library(edgeR)
+library(GEOquery)
+library(biomaRt)
+library(dplyr)
+```
+The citations for packages that were used are as follows:
+[@robinson_2009_edger]
+[@davis_2007_geoquery]
+[@durinck_2009_mapping]
+[@ritchie_2019_limma]
+[@tidyverse_2019_tidyversedplyr]
+[@xie_2021_a]
+
+# Introduction
+### Overview of the study
+COVID-19 is a severe respiratory virus that has affected the world. This study by Yousefi and colleagues aims to identify some therapeutic tools that can be used to fight coronaviruses [@yousefi_2023_betacoronaviruses].
+
+Part of the work involved a genome-wide screen to identify host factors that were required for a coronavirus to infect a given cell.The authors assessed the necessity of the factors for both the novel COVID-19 and HCoV, the common cold. One essential host factor that enables COVID infection is the Aryl hydrocarbon receptor (AHR) [@yousefi_2023_betacoronaviruses]. 
+
+The authors also identified an AHR inhibitor called 3’,4'-dimethoxy-α-naphthoflavone, or DiMNF. They compared its antiviral efficacy in response to viral infection against a DMSO control. They also used RNA-seq to assess how DiMNF induces gene expression changes, thus pointing towards a mechanism to explain antiviral activity. This is the source of the dataset studied in this report [@yousefi_2023_betacoronaviruses].
+
+I chose this dataset because it introduced me to examples of how COVID therapies might work. I have read some literature on the mechanism of the COVID vaccines, but not so much on treatment methods. It was refreshing to see how people attacked the virus from this other angle.
+
+### Downloading the dataset
+The accession number for my dataset is *GSE237131*. The metadata and raw counts were downloaded from GEO and saved as a RData file.The code is configured to check for existence of the data file before downloading to prevent unnecessary downloads.
+```{r}
+# Downloading the metadata
+
+acc_id <- "GSE237131"
+
+# Check for preexistence of the metadata 
+if (! file.exists(paste0(acc_id,".RData"))) {
+  gset <- GEOquery::getGEO(acc_id,GSEMatrix =TRUE,getGPL=FALSE)
+  saveRDS(gset, paste0(acc_id, ".RData"))
+} else {
+  gset <- readRDS(paste0(acc_id, ".RData"))
+}
+gset <- gset[[1]]
+```
+
+
+```{r}
+# Raw counts data
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+path <- paste(urld, "acc=GSE237131", "file=GSE237131_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+
+# Check for preexistence of the raw counts
+if (! file.exists(paste0(acc_id,"counts.RData"))) {
+  counts_matrix = as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames=1)
+  saveRDS(counts_matrix, paste0(acc_id, "counts.RData"))
+} else {
+  counts_matrix = readRDS(paste0(acc_id, "counts.RData"))
+}
+
+# Rename columns with samples for informative names
+sample_names = c(paste0("DMSO_uninfected_", 1:3),
+                 paste0("DiMNF_uninfected_", 1:3),
+                 paste0("DMSO_infected_", 1:3),
+                 paste0("DiMNF_infected_", 1:3))
+
+colnames(counts_matrix) = sample_names
+
+# Visualize part of the raw counts matrix to check if all looks well
+knitr::kable(head(counts_matrix), formal = "html") 
+
+# Ensure that the dimensions (genes by samples) matches the GEO dataset website
+dim(counts_matrix)
+starting_gene_num = dim(counts_matrix)[1]
+```
+Printing the dimensions of the raw counts matrix shows that the authors probed roughly 39k genes across all 12 samples. This is consistent with my expectations based on each sample had about 30 million reads, and indicates good coverage.
+
+### Basic dataset parameters
+The following is some basic information about the dataset we are working with. In brief, this report examines RNA-seq data on human epithelial cells. The cells could receive two possible treatments; they could be infected/uninfected, and treated with DMSO or the antiviral drug DiMNF.
+
+**Title of study**: `r gset@experimentData@title`
+
+**Abstract**: `r gset@experimentData@abstract`
+
+**RNA-seq methodology**: `r unique(gset@phenoData@data$extract_protocol_ch1.1)`
+
+**Platform ID**: `r gset@experimentData@other$platform_id`
+
+**Most recent update**: `r gset@experimentData@other$last_update_date`
+
+**Organism from which samples came**: `r unique(gset@phenoData@data$organism_ch1)`
+
+### Information about the samples
+
+```{r}
+sample_info = gset@phenoData@data[, c("organism_ch1", "characteristics_ch1", "characteristics_ch1.1", "characteristics_ch1.3")] # Extract the most useful columns
+colnames(sample_info) = c("Organism", "Cell line", "Cell type", "Treatment") # Assign meaningful names
+knitr::kable(sample_info, formal = "pipe") # Visualize the data frame
+```
+All samples are from human bronchial epithelial cells. The cells are natively healthy or "normal", thus they are called normal human bronchial epithelial cells (NHBEs). There are 4 conditions: 
+
+1. no infection, DMSO media (control)
+2. no infection, DiMNF inhibitor (test condition for DiMNF)
+3. OC43 infection with DMSO media (test for infection effects) 
+4. OC43 infection + DiMNF inhibitor (test for antiviral effects of DiMNF) 
+
+Each condition has 3 replicate samples, giving rise to 4 x 3 = 12 samples total. 
+
+### Initial data quality check
+We will check the raw counts_matrix for the following:
+
+* duplicated rows of the same gene
+
+* genes without reads in certain samples
+
+* negative read counts (non-permitted values)
+```{r}
+# Check that no genes are duplicated, should return TRUE
+length(unique(rownames(counts_matrix))) == dim(counts_matrix)[1]
+
+# Check that there are no cells without reads, should return FALSE
+any(is.na(counts_matrix))
+
+# Check that there are no negative read values, should return FALSE
+any(counts_matrix < 0)
+```
+All the tests are passed so for now there is no need to filter out negative reads, duplicates, or genes with NA values.
+
+
+### Mapping to HUGO symbols
+A search of any gene ID from counts_matrix on the [HGNC website](https://www.genenames.org/) shows that the IDs are NCBI/entrez IDs. To map my entrez IDs to HUGO symbols, I used the `biomaRt` package. 
+
+```{r}
+# Use biomaRt to get HUGO symbols
+# Define useful parameters
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl")
+entrez_ids <- rownames(counts_matrix) # Input
+
+# Check to see if id_conversion file exists before starting intense computation
+conversion_file <- "id_conversion.rds"
+# 
+if(file.exists(conversion_file)){
+id_conversion <- readRDS(conversion_file)
+} else {
+id_conversion <- getBM(attributes =
+c("entrezgene_id","hgnc_symbol"),
+filters = c("entrezgene_id"),
+values = entrez_ids,
+mart = ensembl)
+saveRDS(id_conversion, conversion_file)
+}
+
+# Merge HUGO symbols into counts_matrix
+annot_counts <- merge(id_conversion,counts_matrix,
+by.x = 1, by.y = 0, all.y=TRUE)
+# Visualize part of the annotated matrix to check that all is well
+knitr::kable(annot_counts[1:5,1:5],type = "html")
+```
+
+Unfortunately, some of the entrez IDs were unable to be mapped to HUGO symbols.
+```{r}
+missing_symbols = annot_counts[is.na(annot_counts$hgnc_symbol), ]
+# Visualize some of the genes without mapped symbols
+head(missing_symbols)
+```
+
+The number of unmapped genes is `r length(missing_symbols$entrezgene_id)`. This means that as a percentage, the proportion of *mapped* genes is `r ((length(annot_counts$entrezgene_id) - length(missing_symbols$entrezgene_id)) * 100) / length(annot_counts$entrezgene_id)` %.
+
+## Cleaning
+### Dealing with HUGO symbol blanks
+Now that we have mapped the entrez IDs to HUGO symbols, we can remove any genes without mapped HUGO symbols. In my dataframe, there are both NA and blank symbols. I removed both of them as follows
+```{r}
+annot_counts = annot_counts[!is.na(annot_counts$hgnc_symbol), ] # Removes NA
+annot_counts = annot_counts[annot_counts$hgnc_symbol != "", ] # Removes blanks
+```
+
+### Dealing with one entrez ID mapping to many HUGOs
+Some entrez IDs mapped to multiple HUGO symbols (one-to-many).
+```{r}
+# Examine how the following example entrezgene_id maps to two HUGO symbols
+annot_counts[annot_counts$entrezgene_id == 100131608, ]
+```
+The paper did not mention how these cases were resolved. I decided arbitrarily to take the first HUGO symbol whenever there was a one-to-many mapping, and eliminate any subsequent rows. The rationale is that in many cases of one entrez ID mapping to multiple HUGO symbols, the HUGO symbols are often very closely related. Thus, the choice of which row to eliminate is also somewhat arbitrary in that it will not affect the biological significance of our conclusions. For example, one can argue that finding PRR23D1 vs PRR23D2 is not making a big difference in the biological implications of the data.
+
+Removal of duplicate entrez IDs is as follows. 
+```{r}
+# duplicated() finds all occurrences of an object AFTER its first occurrence
+# Thus, !duplicated() subsets the first occurrence of every HUGO symbol only
+# Assign this subset back to annot_counts and now every entrez ID is mapped to its first HUGO
+annot_counts = annot_counts[!duplicated(annot_counts$entrezgene_id), ] 
+```
+
+### Dealing with multiple entrez IDs mapping to one HUGO
+Now onto another problem: there appears to be duplicated HUGO symbols. In other words, some entrez IDs mapped to the same HUGO symbol (many entrez IDs to one HUGO).
+```{r}
+(total_hugo = dim(annot_counts)[1]) # Number of total HUGO symbols
+(unique_hugo = length(unique(annot_counts$hgnc_symbol))) # Number of unique HUGO symbols
+
+# Consider this example of a HUGO symbol with multiple entrez IDs
+annot_counts[annot_counts$hgnc_symbol == "MLIP", ]
+```
+The original paper did not report in their RNA-seq methodology how they resolved ID mappings that were not one-to-one. To fix many entrez IDs mapping to one HUGO symbol, I will assume that reads from the same HUGO symbol can be attributed to the same gene. For example, they could be isoforms of transcripts from the same gene. Under this assumption, it would make most sense to sum the reads together for duplicate HUGO symbols.
+```{r}
+# Aggregate all rows together if they share they
+annot_counts = annot_counts %>% group_by(hgnc_symbol) %>% summarise(across(starts_with("D"), ~sum(., na.rm = TRUE)))
+
+# Uncomment if need to check specific HUGOs
+# Vector of all duplicated HUGO symbols, can check the head
+
+# Check for proper aggregation; number of HUGOs after removing duplicates should equal the unique_HUGOs value defined in last code block
+# Must return TRUE
+dim(annot_counts)[1] == unique_hugo
+```
+The annot_counts data frame now has no entrez IDs (since they are no longer of use after being mapped to HUGO). There are also no more duplicate HUGO rows, since these rows have been aggregated together. The data frame now has unique HUGOs only and their associated read counts. We will define the HUGO symbols as the rownames to fit the desired format.
+
+### Filtering out low read count genes
+According to Parkinson and colleagues, filtering out low read count genes is reported to improve detection of differentially expressed genes [@parkinson_2023_gene]. Thus, one cleaning step will be exactly that: removing genes with low expression.
+
+```{r}
+# We have 3 replicates of control samples
+sufficiently_expressed = rowSums(edgeR::cpm(subset(annot_counts, 
+                                                   select = -c(hgnc_symbol))
+                                            ) > 1) >= 3
+# Remove the low read count genes
+filtered_count_matrix = annot_counts[sufficiently_expressed, ]
+
+# Show the number and percentage of genes that were filtered out
+total_genes = dim(annot_counts)[1]
+kept_genes = dim(filtered_count_matrix)[1]
+(low_read_genes = total_genes - kept_genes) # Prints num of excluded genes
+
+percent_kept = ((total_genes - low_read_genes) / total_genes) * 100
+percent_kept
+```
+This removed `r total_genes - kept_genes` genes. Roughly `r percent_kept` % of genes survived this low read count filter.
+
+## Normalization
+Now that the data has been cleaned, we can move on to normalizing it as they are currently raw read counts.
+
+### Initial plotting
+First we will visualize some aspects of the data before we normalize.
+
+```{r, warning = FALSE}
+# Create shorter names for ease of reading in boxplot
+names = c(paste0("DMSO_mock", 1:3),
+          paste0("DiMNF_mock", 1:3),
+          paste0("DMSO_HCoV", 1:3),
+          paste0("DiMNF_HCoV", 1:3)
+          )
+
+# Wrap box in function so I can call at will
+
+make_boxplot = function(data, title) {boxplot(data, ylab = "log2 CPM", main = title, las = 2, cex.axis = 0.7, cex = 0.5, names = names)
+  abline(h=median(apply(data, 2, median)), col="blue", lwd=1)
+  }
+
+
+
+# Plot data before normalization
+log_cpm_data = log2(cpm(subset(filtered_count_matrix, select = -c(hgnc_symbol)))) 
+title = "CPM data before normalization"
+
+# Box
+make_boxplot(log_cpm_data, title)
+
+```
+
+The box plot shows that the distributions across samples are actually already similar. The medians, locations of Q1 and Q3, and overall spread (size of box/IQR, as well as the whisker length) are all similar. Thus, the CPM data is already somewhat normalized. 
+
+
+```{r}
+# Density plot, based on lecture 5
+# Make sure to pass name of data variable into apply
+counts_density <- apply(log_cpm_data, 2, density)
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+# Make sure to change title 
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM",
+main="Log2 CPM density plot before normalization", cex.lab = 0.85)
+#plot each line
+for (i in 1:length(counts_density))
+lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+
+# Create legend, replace colnames() with name of data variable
+legend("topright", colnames(log_cpm_data),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+The density plot confirms the observations from the box plot in that the distributions of CPM across samples are already very similar.
+
+### TMM Normalization
+Next, we will apply TMM normalization just to see if it applies any interesting effects on the data. 
+```{r}
+# Setting up parameters for DGEList function
+groups = colnames(subset(filtered_count_matrix, select = -c(hgnc_symbol)))
+dge_list = DGEList(filtered_count_matrix, group = sample_info$Treatment)
+
+# Obtain factors
+norm_factors = calcNormFactors(dge_list)
+# Obtain counts
+norm_counts = cpm(norm_factors)
+# Return HUGO names
+rownames(norm_counts) = filtered_count_matrix$hgnc_symbol
+```
+
+## Plotting after normalization
+We can repeat the box and density plots to assess how TMM normalization has changed the data (if at all). The box plot is as follows.
+```{r, warning = FALSE}
+make_boxplot(data = log2(norm_counts), title = "Log2 CPM data after TMM normalization")
+```
+
+In terms of data spread and median location, the box plot is not markedly different from how it was before normalization.
+
+One thing to note at this point is that when box plotting both before and after TMM, there were warnings about some outliers. These "outliers" result from -Inf values, so apparently there were some CPM counts of 0 in both the filtered_count_matrix and the norm_counts data frame. 
+
+The density plot is as follows.
+```{r}
+# Density plot, based on lecture 5
+# Make sure to pass name of data variable into apply
+counts_density <- apply(log2(norm_counts), 2, density)
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+# Make sure to change title 
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM",
+main="Log2 CPM density plot after TMM normalization", cex.lab = 0.85)
+#plot each line
+for (i in 1:length(counts_density))
+lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+
+# Create legend, replace colnames() with name of data variable
+legend("topright", colnames(log2(norm_counts)),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+The density plot is also relatively unchanged after TMM normalization, with a peak around 5 and a hump slightly to the right of 0. Thus, normalization did not affect the data too much.
+
+
+
+### Multidimensional scaling (MDS) plot
+The MDS plot shows that the samples are clustered by their treatment condition, but each cluster/treatment is very far from the others. This is as expected.
+```{r, warning = FALSE}
+# based on lecture 5 code
+# Note to self: plot the norm factors not the counts itself
+limma::plotMDS(norm_factors, labels=NULL, pch = 1,
+col = c("darkgreen","blue", "red", "yellow")[factor(sample_info$Treatment )])
+legend("topright",
+legend=levels(factor(sample_info$Treatment )),
+pch=c(1), col = c("darkgreen","blue", "red", "yellow"),title="Class",
+bty = 'n', cex = 0.75)
+```
+
+
+### Dispersion plot
+The biological coefficient variation (BCV) is plotted below.
+```{r}
+model_design <- model.matrix(~sample_info$Treatment)
+d <- estimateDisp(norm_factors, model_design)
+plotBCV(d,col.tagwise = "black",col.common = "red",)
+```
+
+The BCV is relatively consistent across all the genes, so technical variability was low in this RNA-seq experiment, which is good.
+
+### Mean Variance Plot
+The mean variance plot shows that the data roughly follows a negative Binomial distribution, which is one of the common ways to model sequencing read sampling. 
+
+```{r}
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars = TRUE, NBline = TRUE, 
+            show.ave.raw.vars = TRUE, show.binned.common.disp.vars = FALSE, 
+            ylim = c(1,1e10))
+```
+
+In the plot, the fitted blue line is a Negative Binomial distribution, while the black line is a Poisson distribution. The plot shows that a Negative Binomial may better describe the read sampling from this RNA-seq experiment.
+
+# Saving data
+The data is converted to a data frame and also saved locally as per the instructions.
+```{r}
+final_norm_counts = data.frame(norm_counts)
+write.table(norm_counts, file.path(getwd(), paste(acc_id, "filt_TMM_norm_counts.txt", sep = "_")), quote = FALSE, sep = "\t", row.names = TRUE)
+```
+
+
+# Interpretation Questions
+Although these were answered throughout the report, the questions and answers are also compiled here for as a simple summary.
+
+**1. Why is the dataset of interest to you?**
+
+It was an example of research targeting COVID treatment as opposed to the usual vaccine work. In my experience, therapeutic research has gotten less attention than the vaccines, so it was interesting to see this other side of therapeutic research. Although the antiviral drug DiMNF ended up being ineffective against COVID (only worked against HCov common cold), it still offered insight into how researchers come up with these ideas.
+
+**2. What are the control and test conditions of the dataset?**
+
+The control condition is DMSO and mock infection (no antiviral and no infection).
+
+The test conditions are:
+
+* DiMNF + mock infection (tests for DiMNF effects on gene expression)
+
+* DMSO + HCov infection (tests for infection effects on gene expression)
+
+* DiMNF + HCov infection (tests for how DiMNF counters infection)
+
+**3. How many samples in each of the conditions of your dataset?**
+
+Each condition has 3 samples, for a total of 12 samples.
+
+**4. Were there expression values that were not unique for specific genes? How did you handle these?**
+
+There were `r total_hugo - unique_hugo` duplicate HUGO symbols. I decided that it would be reasonable to aggregate all the read counts for the same HUGO symbol together, since they could be different isoform transcripts of the same gene, for example. In cases where one entrez ID mapped to multiple HUGOs, I took the first HUGO, although I argue that the choice is rather arbitrary since all the mapped HUGOs are very similar to each other. However, taking the first HUGO is logistically simpler.
+
+**5. Were there expression values that could not be mapped to current HUGO symbols?**
+
+Yes, there were `r dim(missing_symbols)[1]` genes whose entrez IDs were not mapped to HUGO symbols. These were ultimately removed from the dataset.
+
+**6. Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?**
+
+After filtering and normalization, there were some -Inf values. These seem to result from CPMs of 0 in the data frames, which could lead to suspicions of outliers. However, there was no literature pipeline that suggested filtering more than once, and I had no reason to believe there was some sort of error that persisted past the filtering and TMM. Thus, outliers were removed, and there was no report of removing outliers in the original paper. 
+
+**7. How did you handle replicates?**
+
+There were 4 treatment conditions (technically one is control) and each condition has 3 replicates. Aside from the cleaning, filtering, and normalization (which all happened globally), none of the replicates needed to be individually modified.
+
+**8. What is the final coverage of your dataset?**
+
+After all processing steps, the number of remaining genes is `r dim(norm_counts)[1]`. This is substantially less compared to the number of genes in the raw counts data: `r starting_gene_num`.
+
+
+## References
+
+
+
