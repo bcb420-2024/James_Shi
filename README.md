@@ -9,3 +9,6 @@ My html report for A1 is linked [here](https://github.com/bcb420-2024/James_Shi/
 
 # Assignment 2
 My html report for A2 is linked [here](https://github.com/bcb420-2024/James_Shi/blob/main/a2_james_shi.html)
+
+# Assignment 3
+Mt html for A3 is linked [here](https://github.com/bcb420-2024/James_Shi/blob/main/A3_JamesShi.html)
